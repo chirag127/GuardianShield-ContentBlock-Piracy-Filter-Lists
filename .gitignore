@@ -1,0 +1,43 @@
+# --- Apex Global Ignore List (2025 Standard) ---
+
+# Byte Order Mark
+.DS_Store
+Thumbs.db
+
+# Dependency / Build Artifacts
+/node_modules
+/dist
+/build
+*.log
+.pnpm-debug.log*
+/tmp
+
+# Editor & OS Specific
+.vscode/
+.idea/
+*.swp
+*~
+
+# Python Specific (uv/Ruff/Pytest)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+venv/
+.venv/
+
+# Data & Secrets
+*.env
+*.sqlite3
+/data/
+/output
+
+# Git Specific
+.gitattributes
+.git-blame-ignore-revs
+
+# Documentation & Reports
+/coverage/
+/docs/_build
