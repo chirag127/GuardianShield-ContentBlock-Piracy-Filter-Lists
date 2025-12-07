@@ -1,0 +1,168 @@
+name: Content Integrity & Distribution
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  validate_content:
+    name: Validate Filter Lists and Repository Markdown
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (for markdownlint)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Markdown Linter
+        run: npm install -g markdownlint-cli
+
+      - name: Lint Markdown Files
+        run: markdownlint --ignore 'PROPOSED_README.md' '**/*.md'
+
+      - name: Perform Filter List Validation
+        run: |
+          echo "Starting filter list validation for all *.txt files..."
+          VALIDATION_FAILED=0
+
+          for file in $(find . -type f -name "*.txt" ! -path "./.github/*"); do
+            echo "Processing $file..."
+
+            # Check for empty lines
+            if grep -qE '^\s*$' "$file"; then
+              echo "::error file=$file::Found empty lines. All lines must contain content or be comments."
+              VALIDATION_FAILED=1
+            fi
+
+            # Check for leading/trailing spaces on content lines
+            if grep -qE '^\s|.*[[:space:]]+$' "$file"; then
+              echo "::warning file=$file::Found leading/trailing spaces on some lines. Please trim them for consistency."
+            fi
+
+            # Basic URL/Domain format validation (example for simple ad-blocker lists)
+            # This is a highly simplified check. Real filter lists have complex syntaxes.
+            if grep -P '[^a-zA-Z0-9\-\.\*\[\]\/\_\=\+\?\&\;\%~@!\|\:\#` ]' "$file"; then
+               echo "::warning file=$file::Found potentially invalid characters for domains/URLs. Review for malformed entries."
+            fi
+
+            # Check for duplicate entries (case-insensitive, ignoring comments/empty lines)
+            # This can be resource intensive for very large files.
+            sorted_unique_lines=$(grep -vE '^\s*#|^$' "$file" | sort -fu | wc -l)
+            total_content_lines=$(grep -vE '^\s*#|^$' "$file" | wc -l)
+            if [ "$sorted_unique_lines" -ne "$total_content_lines" ]; then
+              echo "::error file=$file::Duplicate entries detected. All content lines must be unique."
+              VALIDATION_FAILED=1
+            fi
+
+            echo "Finished processing $file."
+          done
+
+          if [ "$VALIDATION_FAILED" -ne 0 ]; then
+            echo "::error::One or more filter lists failed validation checks."
+            exit 1
+          fi
+          echo "All filter lists passed validation."
+
+  create_release:
+    name: Publish New Filter List Release
+    runs-on: ubuntu-latest
+    needs: validate_content
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.validate_content.result == 'success'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetch all history for tag discovery
+
+      - name: Get latest tag and calculate next version
+        id: semver
+        run: |
+          echo "Calculating next semantic version..."
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "Last tag: $LAST_TAG"
+          # Extract major, minor, patch
+          MAJOR=$(echo $LAST_TAG | sed -E 's/v([0-9]+)\.([0-9]+)\.([0-9]+)/\1/')
+          MINOR=$(echo $LAST_TAG | sed -E 's/v([0-9]+)\.([0-9]+)\.([0-9]+)/\2/')
+          PATCH=$(echo $LAST_TAG | sed -E 's/v([0-9]+)\.([0-9]+)\.([0-9]+)/\3/')
+
+          # Increment patch version
+          NEW_PATCH=$((PATCH + 1))
+          NEW_TAG="v${MAJOR}.${MINOR}.${NEW_PATCH}"
+          
+          # If initial v0.0.0, set to v1.0.0
+          if [ "$LAST_TAG" == "v0.0.0" ]; then
+            NEW_TAG="v1.0.0"
+          fi
+
+          echo "New tag: $NEW_TAG"
+          echo "NEW_TAG=$NEW_TAG" >> $GITHUB_ENV
+          echo "LAST_TAG_OUTPUT=$LAST_TAG" >> $GITHUB_OUTPUT
+
+      - name: Create Git Tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag $NEW_TAG
+          git push origin $NEW_TAG
+
+      - name: List Filter Files for Release
+        id: list_files
+        run: |
+          # Get all .txt files in the root and direct subdirectories, exclude .github
+          # Output full paths for `files` input and base names for raw links
+          FULL_PATHS=""
+          RAW_LINKS_MD=""
+          for file_path in $(find . -maxdepth 2 -type f -name "*.txt" ! -path "./.github/*"); do
+            file_name=$(basename "$file_path")
+            FULL_PATHS+="${file_path}\n"
+            RAW_LINKS_MD+="- [${file_name}](https://raw.githubusercontent.com/chirag127/GuardianShield-ContentBlock-Piracy-Filter-Lists/main/${file_path})\n"
+          done
+          
+          # Output for softprops/action-gh-release 'files' input
+          echo "FILES_TO_UPLOAD<<EOF" >> $GITHUB_OUTPUT
+          echo "$FULL_PATHS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          # Output for release body markdown
+          echo "RAW_CONTENT_LINKS<<EOF" >> $GITHUB_OUTPUT
+          echo "$RAW_LINKS_MD" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.NEW_TAG }}
+          name: GuardianShield ContentBlock Filter Lists ${{ env.NEW_TAG }}
+          body: |
+            ## GuardianShield ContentBlock Filter Lists - Release ${{ env.NEW_TAG }}
+
+            This release includes the latest curated filter lists for enhanced digital security and content blocking.
+
+            **Key Updates:**
+            - General content synchronization and updates.
+            - Validation checks for consistency and integrity.
+            - Removal of duplicate entries.
+
+            ### Download Links (Raw Content):
+            ${{ steps.list_files.outputs.RAW_CONTENT_LINKS }}
+
+            ### Changelog:
+            Commits since last release (${{ steps.semver.outputs.LAST_TAG_OUTPUT }}):
+            
+            ${{ github.event.compare }}
+            
+          draft: false
+          prerelease: false
+          files: |
+            ${{ steps.list_files.outputs.FILES_TO_UPLOAD }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
